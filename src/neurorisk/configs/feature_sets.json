@@ -1,0 +1,29 @@
+{
+  "A": {
+    "role": "main",
+    "description": "Cardiometabolic factors only. This is the main research question.",
+    "domains": {
+      "cardiovascular": ["SystolicBP", "DiastolicBP", "Hypertension", "CardiovascularDisease", "Smoking"],
+      "metabolic": ["BMI", "Diabetes", "CholesterolTotal", "CholesterolLDL", "CholesterolHDL", "CholesterolTriglycerides"]
+    }
+  },
+  "B": {
+    "role": "adjusted",
+    "extends": "A",
+    "description": "Set A plus demographics, lifestyle and medical history.",
+    "domains": {
+      "demographic": ["Age", "Gender", "Ethnicity", "EducationLevel"],
+      "lifestyle": ["AlcoholConsumption", "PhysicalActivity", "DietQuality", "SleepQuality"],
+      "history": ["FamilyHistoryAlzheimers", "Depression", "HeadInjury"]
+    }
+  },
+  "C": {
+    "role": "ceiling",
+    "extends": "B",
+    "description": "Set B plus cognitive tests, functional scores and symptoms. These describe the disease itself, so set C is a ceiling, not a risk-factor result.",
+    "domains": {
+      "cognitive_functional": ["MMSE", "FunctionalAssessment", "ADL"],
+      "symptoms": ["MemoryComplaints", "BehavioralProblems", "Confusion", "Disorientation", "PersonalityChanges", "DifficultyCompletingTasks", "Forgetfulness"]
+    }
+  }
+}
