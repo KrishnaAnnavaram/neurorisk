@@ -478,7 +478,7 @@ neurorisk uses no credentials. A local `.env` file is optional, and git ignores 
 | Public dataset (local run), set B, `hgb` | AUROC 0.471 [0.443, 0.498] | same |
 | Public dataset (local run), set C, `hgb` | AUROC 0.950 [0.937, 0.963], ECE 0.035 | same |
 
-The public-dataset rows come from one local run on the 2,149-record Kaggle table. The run used the default settings: 5 outer folds, 3 inner folds, seed 42 and 1000 bootstrap resamples. CI does not reproduce these rows, because git does not store the dataset.
+The public-dataset rows come from one local run on the 2,149-record Kaggle table. The run used the default settings: 5 outer folds, 3 inner folds, seed 42 and 1000 bootstrap resamples. It used scikit-learn 1.7.2 and NumPy 2.1.3. A run with scikit-learn 1.9 gives small differences, for example AUROC 0.500 for set A with `logreg`, but the same conclusions. CI does not reproduce these rows, because git does not store the dataset.
 
 **What the public-dataset numbers show.** The cardiometabolic set A is at chance level (AUROC near 0.5) with both models. The high scores come only with set C. In set C, `cognitive_functional` gives a mean AUROC drop of 0.279 and `symptoms` gives 0.133. The `cardiovascular` and `metabolic` domains give 0.001 each. Thus the dataset gives no evidence that cardiometabolic factors predict the label.
 
@@ -499,7 +499,7 @@ Read these problems before you use neurorisk in production.
 | 5 | Importance | Permutation importance spreads credit over correlated features. | Read domain importance, not single-feature ranks, when features correlate |
 | 6 | Runtime | `--explain` with many features and trees is slow (minutes). | Use fewer `NEURORISK_PERMUTATION_REPEATS` for a first run |
 | 7 | Security | `predict` loads a `.joblib` file, and joblib can run code on load. | Load only model files that you made |
-| 8 | Scope | The rebuild plan names SHAP per outer fold. neurorisk gives SHAP only as an optional helper. | Domain permutation importance is the tested attribution |
+| 8 | Scope | SHAP values are only an optional helper. neurorisk does not calculate SHAP values for each outer fold. | Domain permutation importance is the tested attribution |
 
 ---
 
