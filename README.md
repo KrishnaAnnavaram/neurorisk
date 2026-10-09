@@ -68,6 +68,7 @@ This README is the **one location that explains all of neurorisk**. It gives the
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one record](#42-the-life-cycle-of-one-record)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The data contract and the feature sets](#5-the-data-contract-and-the-feature-sets)
 6. 🟢 [The model pipelines and nested CV](#6-the-model-pipelines-and-nested-cv)
 7. 🟣 [Calibration, risk and importance](#7-calibration-risk-and-importance)
@@ -134,6 +135,58 @@ flowchart LR
 | Final model | `src/neurorisk/training.py` | Fit, save and load one calibrated model. Predict risk and risk bands |
 | CLI | `src/neurorisk/cli.py` | The `neurorisk` command with 8 subcommands |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>neurorisk command"]
+    CFG["config.py<br/>Settings, parse_bands"]
+    subgraph DATAIN["Data in"]
+        DATA["data.py<br/>CSVSource, SyntheticSource, load"]
+        SYN["synthetic.py<br/>generate"]
+        SCH["schema.py<br/>COLUMNS, validate, coerce"]
+        FEAT["features.py<br/>load_feature_sets, select"]
+    end
+    subgraph MODEL["Models and nested CV"]
+        NCV["nested_cv.py<br/>run_nested_cv, fit_calibrated"]
+        MOD["models.py<br/>MODELS, build_pipeline"]
+        TUN["tuning.py<br/>tune"]
+        EXP["explain.py<br/>domain_importance"]
+        TRN["training.py<br/>train_final, TrainedModel"]
+    end
+    subgraph RESULTS["Results"]
+        REP["report.py<br/>summarize_result, compare, write_outputs"]
+        MET["metrics.py<br/>summarize, paired_bootstrap, holm"]
+        RISK["risk.py<br/>RiskBands"]
+        STA["stats.py<br/>compare_groups"]
+    end
+
+    CLI --> CFG
+    CLI --> SYN
+    CLI --> DATA
+    CLI --> FEAT
+    CLI --> NCV
+    CLI --> REP
+    CLI --> TRN
+    CLI --> STA
+    DATA --> SYN
+    DATA --> SCH
+    FEAT --> SCH
+    MOD --> SCH
+    NCV --> FEAT
+    NCV --> MOD
+    NCV --> TUN
+    NCV --> EXP
+    TRN --> NCV
+    TRN --> TUN
+    TRN --> RISK
+    TRN --> SCH
+    REP --> MET
+    REP --> RISK
+    REP --> EXP
+    STA --> MET
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -170,6 +223,18 @@ Feature set `A` contains only cardiometabolic features and gives the main result
 ### 3.2 A whitelist for model inputs
 `features.select` copies only the columns of the feature set. A column that a caller adds to the table, for example an old risk score, cannot reach a model. The feature-set parser rejects the ID, the label, `DoctorInCharge` and any column that is not in the schema.
 
+```mermaid
+flowchart LR
+    JSON[/"feature_sets.json<br/>or --feature-config"/] --> PARSE["parse_feature_sets<br/>resolve the extends chains"]
+    PARSE --> CHK{"each column a schema feature,<br/>not ID, label or DoctorInCharge,<br/>listed one time?"}
+    CHK -- "no" --> ERR[/"FeatureSetError"/]
+    CHK -- "yes" --> FS["FeatureSet A, B or C"]
+    TAB[/"validated table<br/>plus any extra column"/] --> SEL["select<br/>copy only the listed columns"]
+    FS --> SEL
+    SEL --> X[/"model inputs"/]
+    TAB -- "extra columns are not copied" --> DROP["never reaches a model"]
+```
+
 ### 3.3 Measurement records never touch tuning
 `nested_cv.run_nested_cv` gives only the outer training records to the tuner and to the calibrator. The outer test records get one out-of-fold prediction each. A test checks that the tuner never receives an outer test record.
 
@@ -195,9 +260,13 @@ The seed controls the splits, the models, the bootstrap and the permutations. Th
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    SRC["CSVSource or SyntheticSource"] --> VAL["validate: schema errors stop the run"]
-    VAL --> SEL["select: feature set A, B or C"]
+flowchart TD
+    SRC{"--data or NEURORISK_DATA?"} -- "CSV path" --> CSV[/"CSVSource: CSV file"/]
+    SRC -- "none or synthetic" --> GEN["SyntheticSource: synthetic.generate"]
+    CSV --> VAL{"validate: schema errors?"}
+    GEN --> VAL
+    VAL -- "yes" --> STOP[/"SchemaError, the run stops"/]
+    VAL -- "no" --> SEL["select: feature set A, B or C"]
     SEL --> SPL["outer folds: stratified, grouped by PatientID"]
     SPL --> TR["outer training records"]
     SPL --> TE["outer test records"]
@@ -210,13 +279,41 @@ flowchart TB
     OOF --> MET["metrics + bootstrap CIs"]
     OOF --> BAND["risk bands + observed rates"]
     OOF --> CMP["paired tests vs set A, Holm"]
-    MET --> REP["report.md, results.json, model cards"]
+    MET --> REP[("outputs/<br/>report.md, results.json, model cards")]
     BAND --> REP
     CMP --> REP
     IMP --> REP
+    REP --> HUMAN{{"HUMAN<br/>researcher reads set A as the answer<br/>and set C as a ceiling"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one record
+
+```mermaid
+stateDiagram-v2
+    state "Raw row" as Raw
+    state "Validated record" as Valid
+    state "Feature-set columns" as Selected
+    state "In outer training folds" as Training
+    state "In its own outer test fold" as Testing
+    state "Out-of-fold risk" as Risk
+    state "Risk band" as Banded
+    state "In the report" as Reported
+    [*] --> Raw: CSVSource.read or SyntheticSource.read
+    Raw --> SchemaError: schema error, the run stops
+    Raw --> Valid: validate, coerce
+    Valid --> Selected: select
+    Selected --> Training: the other outer folds
+    Training --> Training: tune, calibrate, fit
+    Training --> Testing: its own outer fold
+    Testing --> Risk: predict_proba of a model that did not see it
+    Risk --> Banded: RiskBands.assign
+    Banded --> Reported: metrics, band table, decision curve
+    SchemaError --> [*]
+    Reported --> [*]
+```
 
 1. The data source reads the record from the CSV file or from the generator.
 2. The validator checks each value against the schema range and the permitted values.
@@ -227,11 +324,90 @@ flowchart TB
 7. The risk band function gives the record a band label.
 8. The metrics, the band table and the decision curve include the out-of-fold prediction of the record.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as neurorisk CLI
+    participant DS as DataSource
+    participant SCH as schema.validate
+    participant NCV as run_nested_cv
+    participant TUN as tune
+    participant CAL as CalibratedClassifierCV
+    participant REP as report.py
+    participant FS as outputs folder
+
+    R->>CLI: neurorisk compare --data file --model logreg --explain
+    CLI->>CLI: Settings.from_env, then the command-line overrides
+    CLI->>DS: read()
+    DS-->>CLI: raw table
+    CLI->>SCH: validate(raw)
+    SCH-->>CLI: ValidationReport, errors stop the run
+    CLI->>CLI: load_feature_sets
+    loop each feature set in --feature-sets
+        CLI->>NCV: run_nested_cv(dataset, set, model, settings)
+        loop each outer fold
+            NCV->>TUN: tune on the outer training records
+            TUN-->>NCV: params and inner AUROC
+            NCV->>CAL: fit on the outer training records
+            NCV->>CAL: predict_proba(outer test records)
+            CAL-->>NCV: out-of-fold risk
+            NCV->>NCV: domain and feature importance
+        end
+        NCV-->>CLI: NestedCVResult
+        CLI->>REP: summarize_result
+    end
+    CLI->>REP: compare against the first set, Holm
+    CLI->>REP: write_outputs
+    REP->>FS: report.md, results.json, model cards
+    CLI-->>R: table, AUROC differences, data notice
+```
+
 ---
 
 ## 5. The data contract and the feature sets
 
 **Purpose.** Stop invalid data before a model sees it, and fix the model inputs for each research question.
+
+```mermaid
+flowchart TD
+    SRC[/"--data path, synthetic,<br/>or NEURORISK_DATA"/] --> SF["source_for"]
+    SF -- "path" --> CSV["CSVSource.read"]
+    SF -- "none or synthetic" --> SYN["SyntheticSource.read<br/>synthetic.generate"]
+    CSV --> V["validate"]
+    SYN --> V
+    V --> C1{"34 required columns<br/>and at least one row?"}
+    C1 -- "no" --> ERR[/"SchemaError"/]
+    C1 -- "yes" --> C2{"numeric, in range,<br/>in the permitted set?"}
+    C2 -- "no" --> ERR
+    C2 -- "yes" --> C3{"ID and label present,<br/>both label classes?"}
+    C3 -- "no" --> ERR
+    C3 -- "yes" --> W["warnings: missing features,<br/>unknown columns, repeated IDs"]
+    W --> CO["coerce, reset the index"]
+    CO --> H["frame_sha256"]
+    H --> OUT[/"Dataset: frame, report,<br/>source, sha256"/]
+```
+
+```mermaid
+flowchart LR
+    subgraph SA["Set A, main: 11 features"]
+        CV["cardiovascular"]
+        ME["metabolic"]
+    end
+    subgraph SB["Set B, adjusted: 22 features"]
+        DE["demographic"]
+        LI["lifestyle"]
+        HI["history"]
+    end
+    subgraph SC["Set C, ceiling: 32 features"]
+        CF["cognitive_functional"]
+        SY["symptoms"]
+    end
+    SA -- "B extends A" --> SB
+    SB -- "C extends B" --> SC
+```
 
 | Input | Output |
 |---|---|
@@ -274,6 +450,71 @@ flowchart TB
 
 **Purpose.** Measure each model on records that its tuning and calibration did not see.
 
+```mermaid
+flowchart LR
+    X[/"feature-set columns"/] --> CT["ColumnTransformer"]
+    CT -- "numeric, binary, ordinal" --> NUM["SimpleImputer median,<br/>then StandardScaler"]
+    CT -- "nominal: Ethnicity" --> CAT["SimpleImputer most_frequent,<br/>then OneHotEncoder"]
+    NUM --> MOD{"model"}
+    CAT --> MOD
+    MOD --> PR["prior: DummyClassifier"]
+    MOD --> LR["logreg"]
+    MOD --> RF["rf: 300 trees"]
+    MOD --> HGB["hgb"]
+    MOD --> XGB["xgb, extra"]
+    MOD --> ST["stack: logreg + rf + hgb,<br/>logistic meta-model"]
+```
+
+```mermaid
+flowchart TD
+    DS[/"Dataset, feature set, model, Settings"/] --> SEL["select the feature-set columns"]
+    SEL --> OS["outer_splits<br/>StratifiedGroupKFold by PatientID"]
+    OS --> FOLD["next outer fold"]
+    FOLD --> TUNE["tune on the outer training records<br/>inner StratifiedKFold"]
+    TUNE --> P{"model is prior?"}
+    P -- "yes" --> FITP["fit with no calibration"]
+    P -- "no" --> CAL["CalibratedClassifierCV<br/>sigmoid or isotonic, inner folds"]
+    FITP --> PRED["predict_proba on the outer test records"]
+    CAL --> PRED
+    PRED --> OOF["store the out-of-fold risk"]
+    OOF --> EXQ{"--explain?"}
+    EXQ -- "yes" --> IMP["domain and feature importance"]
+    MORE{"more folds?"}
+    EXQ -- "no" --> MORE
+    IMP --> MORE
+    MORE -- "yes" --> FOLD
+    MORE -- "no" --> CHK{"each record has<br/>a prediction?"}
+    CHK -- "no" --> ERR[/"RuntimeError"/]
+    CHK -- "yes" --> OUT[/"NestedCVResult"/]
+```
+
+```mermaid
+flowchart LR
+    IN[/"pipeline, grid,<br/>outer training records"/] --> G{"grid empty?"}
+    G -- "yes: prior, stack" --> NONE[/"no parameters"/]
+    G -- "no" --> B{"NEURORISK_TUNING"}
+    B -- "grid" --> GS["GridSearchCV<br/>roc_auc, inner folds"]
+    B -- "optuna" --> OP["Optuna TPE sampler<br/>same grid, NEURORISK_OPTUNA_TRIALS"]
+    GS --> OUT[/"TuningResult:<br/>params, inner AUROC"/]
+    OP --> OUT
+```
+
+`neurorisk train` and `neurorisk predict` use the same pipeline, tuner and calibration on all records:
+
+```mermaid
+flowchart LR
+    DS[/"all records"/] --> TU["tune with inner CV<br/>on all records"]
+    TU --> FC["fit_calibrated<br/>on all records"]
+    FC --> TM["TrainedModel<br/>params, risk bands, metadata"]
+    TM --> SAVE[("models/a_logreg.joblib")]
+    SAVE --> LOAD["load_model<br/>TrainedModel type check"]
+    NEW[/"new records CSV"/] --> VAL{"validate,<br/>no label needed"}
+    VAL -- "errors" --> ERR[/"SchemaError"/]
+    VAL -- "OK" --> PRED["select, predict_proba,<br/>RiskBands.assign"]
+    LOAD --> PRED
+    PRED --> OUT[/"risk_probability, risk_band"/]
+```
+
 | Input | Output |
 |---|---|
 | A `Dataset`, a feature set, a model name and `Settings` | A `NestedCVResult`: one out-of-fold prediction per record, and per-fold parameters and importance |
@@ -308,6 +549,34 @@ flowchart TB
 
 **Purpose.** Give a risk value with a probabilistic meaning, and show which domains a model uses.
 
+```mermaid
+flowchart LR
+    TP["tuned pipeline"] --> CAL["CalibratedClassifierCV<br/>NEURORISK_CALIBRATION, inner folds"]
+    CAL --> P[/"risk: calibrated probability"/]
+    P --> AS["RiskBands.assign<br/>cut-offs NEURORISK_RISK_BANDS"]
+    AS -- "below 0.10" --> LOW["low"]
+    AS -- "0.10 to 0.30" --> MOD["moderate"]
+    AS -- "0.30 to 0.60" --> EL["elevated"]
+    AS -- "0.60 and above" --> HI["high"]
+    LOW --> TAB["RiskBands.table<br/>count, mean risk, observed rate"]
+    MOD --> TAB
+    EL --> TAB
+    HI --> TAB
+```
+
+```mermaid
+flowchart TD
+    IN[/"fitted model,<br/>outer test records"/] --> BASE["base AUROC"]
+    BASE --> G["for each domain or feature"]
+    G --> PERM["one row permutation<br/>for all columns of the group"]
+    PERM --> DROP["AUROC drop:<br/>base minus shuffled AUROC"]
+    DROP --> REP{"NEURORISK_PERMUTATION_REPEATS<br/>reached?"}
+    REP -- "no" --> PERM
+    REP -- "yes" --> MEAN["mean and SD for this fold"]
+    MEAN --> AVG["average_importance<br/>mean over folds, sorted"]
+    AVG --> OUT[/"domain_importance,<br/>feature_importance"/]
+```
+
 | Input | Output |
 |---|---|
 | Out-of-fold predictions and the outer test records | Risk bands with observed rates, a calibration table, domain and feature importance |
@@ -337,6 +606,19 @@ flowchart TB
 
 ## 8. The metrics and the statistical rules
 
+```mermaid
+flowchart LR
+    OOF[/"labels and out-of-fold risk"/] --> BS["bootstrap_ci for each metric<br/>stratified, NEURORISK_BOOTSTRAP resamples"]
+    BS --> M["AUROC, AUPRC, Brier,<br/>log loss, ECE"]
+    OOF --> CS["calibration_slope_intercept"]
+    OOF --> CT["calibration_table<br/>10 bins"]
+    OOF --> DC["decision_curve<br/>thresholds 0.05 to 0.5"]
+    M --> SUM[/"summarize_result"/]
+    CS --> SUM
+    CT --> SUM
+    DC --> SUM
+```
+
 | Metric | Meaning | Better |
 |---|---|---|
 | AUROC | Ranking quality over all thresholds | Higher (0.5 is chance) |
@@ -352,9 +634,46 @@ flowchart TB
 |---|---|
 | Confidence interval | 95% percentile, stratified bootstrap, `NEURORISK_BOOTSTRAP` resamples (default 1000) |
 | Feature-set comparison | Paired bootstrap of the AUROC difference against the first set in `--feature-sets` |
-| p-value | Two-sided bootstrap p-value, minimum 1 divided by the number of resamples |
+| p-value | Two-sided bootstrap p-value, minimum 2 divided by the number of resamples |
 | Multiple comparisons | Holm for feature-set comparisons. Holm and Benjamini-Hochberg for group statistics |
 | Group statistics | Mann-Whitney U on raw features, rank-biserial effect size |
+
+`report.compare` tests each feature set against the reference set:
+
+```mermaid
+flowchart LR
+    REF[/"out-of-fold risk,<br/>first set in --feature-sets"/] --> PB["paired_bootstrap<br/>same resampled records"]
+    OTH[/"out-of-fold risk,<br/>each other set"/] --> PB
+    PB --> D["AUROC difference,<br/>95% CI"]
+    PB --> PV["two-sided p-value,<br/>minimum 2 / resamples"]
+    PV --> HOLM["holm over all comparisons"]
+    D --> OUT[/"comparisons in report.md<br/>and results.json"/]
+    HOLM --> OUT
+```
+
+`stats.compare_groups` gives the descriptive group statistics of `neurorisk stats`:
+
+```mermaid
+flowchart TD
+    IN[/"validated table, columns"/] --> RAW{"all columns are<br/>raw schema features?"}
+    RAW -- "no" --> ERR[/"CircularTestError"/]
+    RAW -- "yes" --> MW["for each feature:<br/>Mann-Whitney U, cases vs controls"]
+    MW --> RB["rank-biserial effect size"]
+    RB --> ADJ["holm and benjamini_hochberg"]
+    ADJ --> OUT[/"table sorted by p-value"/]
+```
+
+`report.write_outputs` writes the files of `compare`, `demo` and `evaluate --out`:
+
+```mermaid
+flowchart LR
+    SUMS[/"summaries"/] --> WO["write_outputs"]
+    CMPS[/"comparisons"/] --> WO
+    DSH[/"data hash, source,<br/>settings, version"/] --> WO
+    WO --> RJ[("results.json")]
+    WO --> RM[("report.md")]
+    WO --> MC[("model_card_set_model.md<br/>one for each model")]
+```
 
 ---
 
@@ -429,6 +748,26 @@ pytest -q
 
 The `evaluate`, `compare`, `train`, `stats` and `demo` commands accept `--data`, `--synthetic-rows`, `--seed`, `--outer-folds`, `--inner-folds`, `--bootstrap`, `--calibration`, `--tuning` and `--bands`. A command-line value replaces the environment value.
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> SYN["neurorisk synth"]
+    INS --> DL[/"Kaggle CSV<br/>see data/README.md"/]
+    SYN --> SCSV[("data/synthetic.csv")]
+    DL --> VAL["neurorisk validate"]
+    SCSV --> VAL
+    VAL --> CMP["neurorisk compare or evaluate"]
+    CMP --> OUT[("outputs/<br/>report.md, results.json, model cards")]
+    VAL --> STATS["neurorisk stats"]
+    VAL --> TR["neurorisk train"]
+    TR --> MOD[("models/a_logreg.joblib")]
+    MOD --> PRED["neurorisk predict"]
+    PRED --> PCSV[("predictions.csv")]
+    INS --> DEMO["neurorisk demo<br/>synthetic, sets A, B, C"]
+    DEMO --> OUT
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
@@ -446,6 +785,18 @@ The `evaluate`, `compare`, `train`, `stats` and `demo` commands accept `--data`,
 | `NEURORISK_RISK_BANDS` | risk bands | Increasing cut-offs inside (0, 1) (default `0.1,0.3,0.6`) |
 
 neurorisk uses no credentials. A local `.env` file is optional, and git ignores it.
+
+```mermaid
+flowchart LR
+    DOT[/".env file, optional"/] --> MERGE["Settings.from_env<br/>the process environment wins"]
+    ENV[/"process environment"/] --> MERGE
+    MERGE --> CHK{"integers, minimums, methods<br/>and band cut-offs valid?"}
+    CHK -- "no" --> ERR[/"ConfigError, exit code 2"/]
+    CHK -- "yes" --> SET["Settings"]
+    CLI[/"command-line options"/] --> OV["with_overrides"]
+    SET --> OV
+    OV --> RUN[/"settings of the run"/]
+```
 
 ---
 
